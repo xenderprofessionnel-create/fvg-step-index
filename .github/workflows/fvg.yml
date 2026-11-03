@@ -1,0 +1,50 @@
+name: Alerte FVG Step Index
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"     # toutes les 5 minutes
+  workflow_dispatch:           # lancement manuel
+    inputs:
+      mode:
+        description: "test"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fvg
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Installer la dépendance
+        run: pip install websocket-client
+
+      - name: Chercher les FVG
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MIN_GAP: ${{ vars.MIN_GAP }}
+          TZ_HOURS: ${{ vars.TZ_HOURS }}
+        run: python fvg_alert.py ${{ github.event.inputs.mode }}
+
+      - name: Sauvegarder la mémoire des alertes
+        run: |
+          if [ -n "$(git status --porcelain state.json)" ]; then
+            git config user.name "fvg-bot"
+            git config user.email "fvg-bot@users.noreply.github.com"
+            git add state.json
+            git commit -m "maj etat"
+            git push
+          fi
