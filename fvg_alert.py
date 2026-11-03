@@ -38,6 +38,87 @@ def telegram(text):
     urllib.request.urlopen(req, timeout=20).read()
 
 
+def telegram_photo(path, caption):
+    """Envoie une image (avec légende) à Telegram."""
+    if not TOKEN or not CHAT_ID:
+        print("[Telegram non configuré] image :", path, "|", caption)
+        return
+    boundary = "----fvgboundary7d1f"
+
+    def part(name, value):
+        return (f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n').encode()
+
+    with open(path, "rb") as fh:
+        img = fh.read()
+    body = part("chat_id", CHAT_ID) + part("caption", caption)
+    body += (f'--{boundary}\r\nContent-Disposition: form-data; name="photo"; filename="chart.png"\r\n'
+             "Content-Type: image/png\r\n\r\n").encode() + img + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{TOKEN}/sendPhoto", data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    urllib.request.urlopen(req, timeout=30).read()
+
+
+def make_chart(window, fvgs, highlight=None, path="/tmp/chart.png"):
+    """Dessine les bougies M30 de la fenêtre et colore les zones FVG."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+
+    UP, DN, BG, FG = "#26a69a", "#ef5350", "#0f1419", "#c9d1d9"
+    fig, ax = plt.subplots(figsize=(8, 5), dpi=130)
+    fig.patch.set_facecolor(BG)
+    ax.set_facecolor(BG)
+    n = len(window)
+    index = {c["epoch"]: i for i, c in enumerate(window)}
+
+    for f in fvgs:                                   # zones FVG (derrière les bougies)
+        i3 = index.get(f["epoch"])
+        if i3 is None:
+            continue
+        color = UP if f["type"] == "HAUSSIER" else DN
+        strong = f["key"] == highlight
+        x0, x1 = i3 - 2 - 0.4, n - 0.5
+        ax.add_patch(Rectangle((x0, f["low"]), x1 - x0, f["high"] - f["low"], facecolor=color,
+                               alpha=0.45 if strong else 0.18, edgecolor=color if strong else "none",
+                               linewidth=1.2, zorder=1))
+        ax.text(x1 - 0.1, (f["low"] + f["high"]) / 2, "FVG", color=color, fontsize=8,
+                ha="right", va="center", zorder=5)
+
+    for i, c in enumerate(window):                   # bougies
+        col = UP if c["close"] >= c["open"] else DN
+        ax.plot([i, i], [c["low"], c["high"]], color=col, lw=1.5, zorder=3)
+        h = max(abs(c["close"] - c["open"]), 0.02)
+        ax.add_patch(Rectangle((i - 0.3, min(c["open"], c["close"])), 0.6, h, color=col, zorder=4))
+
+    lo = min([c["low"] for c in window] + [f["low"] for f in fvgs])
+    hi = max([c["high"] for c in window] + [f["high"] for f in fvgs])
+    pad = (hi - lo) * 0.08 or 1
+    ax.set_ylim(lo - pad, hi + pad)
+    ax.set_xlim(-0.7, n - 0.3)
+    ax.set_xticks(range(n))
+    ax.set_xticklabels([hhmm(c["epoch"]) for c in window], rotation=45, fontsize=8)
+    ax.tick_params(colors=FG, labelsize=8)
+    ax.grid(axis="y", color="#2a323c", linewidth=0.5)
+    for s in ax.spines.values():
+        s.set_color("#2a323c")
+    ax.set_title(f"Step Index 100 - M30 (UTC{TZ_HOURS:+g})", color=FG, fontsize=11)
+    fig.tight_layout()
+    fig.savefig(path, facecolor=BG)
+    plt.close(fig)
+    return path
+
+
+def send_alert(window, fvgs, fvg, text):
+    """Envoie le graphique + le texte ; si le graphique échoue, envoie le texte seul."""
+    try:
+        telegram_photo(make_chart(window, fvgs, fvg["key"] if fvg else None), text)
+    except Exception as e:
+        print("Graphique impossible, envoi du texte seul :", e)
+        telegram(text)
+
+
 def call(ws, payload, expect):
     ws.send(json.dumps(payload))
     while True:
@@ -138,7 +219,7 @@ def main():
         for c in window[-3:]:
             lines.append(f"{hhmm(c['epoch'])}  O {c['open']}  H {c['high']}  L {c['low']}  C {c['close']}")
         lines.append(f"FVG dans les 6 dernières heures : {len(fvgs)}")
-        telegram("\n".join(lines))
+        send_alert(window, fvgs, None, "\n".join(lines))
         return
 
     seen, first_run = load_state()
@@ -148,7 +229,7 @@ def main():
     else:
         for f in fvgs:
             if f["key"] not in seen:
-                telegram(describe(f))
+                send_alert(window, fvgs, f, describe(f))
                 seen[f["key"]] = f["epoch"]
     limit = int(time.time()) - 12 * 3600
     seen = {k: v for k, v in seen.items() if v >= limit}
