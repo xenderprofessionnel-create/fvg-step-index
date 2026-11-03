@@ -29,7 +29,7 @@ jobs:
           python-version: "3.12"
 
       - name: Installer la dépendance
-        run: pip install websocket-client
+        run: pip install websocket-client matplotlib
 
       - name: Chercher les FVG
         env:
